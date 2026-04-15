@@ -3,7 +3,7 @@
 // =============================================================================
 // == Autor: Artefacto (Jorge Caballero)                                      ==
 // == Descripción: Bot de Telegram que simula ser Javier Soto, interactuando  ==
-// ==              con GPT y generando/transformando voz con ElevenLabs.      ==
+// ==              con Claude y generando/transformando voz con ElevenLabs.   ==
 // =============================================================================
 
 // -----------------------------------------------------------------------------
@@ -15,7 +15,7 @@ require('dotenv').config();
 
 // Importar módulos necesarios
 const { Telegraf } = require('telegraf');        // Framework del bot de Telegram
-const { OpenAI } = require('openai');          // Cliente oficial de OpenAI
+const Anthropic = require('@anthropic-ai/sdk').default; // Cliente oficial de Anthropic (Claude)
 const axios = require('axios');                // Para realizar solicitudes HTTP (API ElevenLabs, descarga de archivos)
 const fs = require('fs');                      // Módulo File System (para manejar archivos temporales)
 const path = require('path');                  // Módulo Path (para construir rutas de archivos)
@@ -77,10 +77,10 @@ const CONFIG = {
     MAX_RETRIES: 3,          // Máximo de reintentos para operaciones fallidas (APIs)
     RETRY_DELAY: 5000,       // Delay base antes del primer reintento (ms)
   },
-  /** Configuraciones para OpenAI GPT */
-  GPT: {
-    MODEL: "gpt-4-turbo-preview", // Modelo a usar (asegúrate de tener acceso)
-    MAX_TOKENS: 500              // Límite de tokens en la respuesta generada
+  /** Configuraciones para Claude (Anthropic) */
+  CLAUDE: {
+    MODEL: "claude-sonnet-4-6", // Modelo de Claude a usar
+    MAX_TOKENS: 500             // Límite de tokens en la respuesta generada
   },
   /** Configuraciones para ElevenLabs */
   ELEVEN_LABS: {
@@ -129,22 +129,20 @@ try {
 // -- 4. Inicialización de Clientes de API                                    --
 // -----------------------------------------------------------------------------
 
-// --- Cliente OpenAI ---
-let openai = null; // Inicializar como null
+// --- Cliente Anthropic (Claude) ---
+let anthropic = null; // Inicializar como null
 try {
   // Solo inicializar si la API Key está presente en .env
-  if (process.env.OPENAI_API_KEY) {
-    openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
+  if (process.env.ANTHROPIC_API_KEY) {
+    anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
     });
-    Logger.log("Cliente OpenAI inicializado correctamente.");
+    Logger.log("Cliente Anthropic (Claude) inicializado correctamente.");
   } else {
-    // Si no hay clave, la funcionalidad GPT estará deshabilitada
-    Logger.warn("OPENAI_API_KEY no encontrada en .env. Funcionalidad de chat GPT estará deshabilitada.");
+    Logger.warn("ANTHROPIC_API_KEY no encontrada en .env. Funcionalidad de chat con IA estará deshabilitada.");
   }
 } catch (error) {
-  Logger.error("Error durante la inicialización del cliente OpenAI", error);
-  // No necesariamente fatal, el bot puede funcionar sin GPT si está configurado
+  Logger.error("Error durante la inicialización del cliente Anthropic", error);
 }
 
 // Nota: El cliente de ElevenLabs (axios) se usa directamente en ApiService, no requiere inicialización aquí.
@@ -206,8 +204,8 @@ class Utils {
     }
 
     // Avisar sobre opcionales faltantes pero no marcar como error
-    if (!process.env.OPENAI_API_KEY) {
-        Logger.warn("Utils.validateEnvVars: OPENAI_API_KEY no definida (GPT deshabilitado).");
+    if (!process.env.ANTHROPIC_API_KEY) {
+        Logger.warn("Utils.validateEnvVars: ANTHROPIC_API_KEY no definida (chat con IA deshabilitado).");
     }
     if (!process.env.ELEVEN_API_KEY) {
         Logger.warn("Utils.validateEnvVars: ELEVEN_API_KEY no definida (funcionalidad de voz deshabilitada).");
@@ -273,9 +271,9 @@ class StateManager {
     /** @type {Map<number, {lastAction: number, currentOperation: string|null, preferences: object}>} */
     this.userSessions = new Map();          // Información de sesión por User ID
     /** @type {Map<number, string>} */
-    this.pendingOperations = new Map();     // Marca si un usuario tiene una operación larga en curso (GPT, TTS, V2V)
+    this.pendingOperations = new Map();     // Marca si un usuario tiene una operación larga en curso (Claude, TTS, V2V)
     /** @type {Map<number, Array<{role: string, content: string}>>} */
-    this.conversations = new Map();         // Historial de conversación GPT por User ID
+    this.conversations = new Map();         // Historial de conversación por User ID
     /** @type {Map<number, number>} */
     this.pendingVoiceTransformations = new Map(); // User ID -> message_id que inició el comando /v2v
   }
@@ -303,39 +301,31 @@ class StateManager {
     });
   }
 
-  // --- Métodos de Conversación GPT ---
-  /** Obtiene el historial de conversación GPT para un usuario, creándolo si no existe. */
+  // --- Métodos de Conversación ---
+  /** Obtiene el historial de conversación para un usuario, creándolo si no existe. */
   getConversation(userId) {
     if (!this.conversations.has(userId)) {
-      // Logger.log(`StateManager: Creando nueva conversación GPT para usuario ${userId}`); // Un poco verboso
-      this.conversations.set(userId, [{
-        role: "system",
-        content: this.getSystemPrompt() // Añadir el prompt del sistema al inicio
-      }]);
+      this.conversations.set(userId, []);
     }
     return this.conversations.get(userId);
   }
 
-  /** Añade un mensaje al historial GPT de un usuario y limita la longitud del historial. */
+  /** Añade un mensaje al historial de un usuario y limita la longitud del historial. */
   addMessageToConversation(userId, role, content) {
-    // No hacer nada si GPT está deshabilitado
-    if (!openai) return;
+    if (!anthropic) return;
 
-    // Logger.log(`StateManager: Añadiendo mensaje (${role}) a conv GPT de ${userId}`); // Verboso
     const conversation = this.getConversation(userId);
     conversation.push({ role, content });
 
     // Limitar el historial para controlar el uso de tokens
     const maxHistoryPairs = 10; // Guardar las últimas N interacciones (user + assistant)
-    const maxMessages = 1 + (maxHistoryPairs * 2); // 1 (system) + N*2 (user/assistant)
+    const maxMessages = maxHistoryPairs * 2; // N*2 (user/assistant)
     if (conversation.length > maxMessages) {
-      // Logger.log(`StateManager: Conv GPT de ${userId} excede ${maxMessages} mensajes. Eliminando ${conversation.length - maxMessages} antiguos.`);
-      // Elimina los mensajes más antiguos después del mensaje del sistema (índice 1)
-      conversation.splice(1, conversation.length - maxMessages);
+      conversation.splice(0, conversation.length - maxMessages);
     }
   }
 
-  /** Devuelve el prompt del sistema para GPT. */
+  /** Devuelve el prompt del sistema para Claude. */
   getSystemPrompt() {
     // Mismo prompt detallado que antes
     return `
@@ -393,7 +383,7 @@ class StateManager {
 }
 
 // -----------------------------------------------------------------------------
-// -- 7. Servicios de API (OpenAI y ElevenLabs)                               --
+// -- 7. Servicios de API (Anthropic/Claude y ElevenLabs)                      --
 // -----------------------------------------------------------------------------
 
 /**
@@ -401,46 +391,42 @@ class StateManager {
  */
 class ApiService {
   /**
-   * Genera una respuesta de texto usando la API de OpenAI GPT.
-   * @param {Array<{role: string, content: string}>} messages - Historial de mensajes.
-   * @returns {Promise<string>} - La respuesta generada por GPT.
-   * @throws {Error} - Si la API de OpenAI no está disponible o falla.
+   * Genera una respuesta de texto usando la API de Anthropic Claude.
+   * @param {Array<{role: string, content: string}>} messages - Historial de mensajes (sin system).
+   * @param {string} systemPrompt - El prompt del sistema.
+   * @returns {Promise<string>} - La respuesta generada por Claude.
+   * @throws {Error} - Si la API de Anthropic no está disponible o falla.
    */
-  static async generateGPTResponse(messages) {
-    if (!openai) { // Verificar si el cliente OpenAI fue inicializado
-      Logger.error("ApiService.generateGPTResponse: Intento de uso sin cliente OpenAI inicializado.");
+  static async generateClaudeResponse(messages, systemPrompt) {
+    if (!anthropic) {
+      Logger.error("ApiService.generateClaudeResponse: Intento de uso sin cliente Anthropic inicializado.");
       throw new Error("La funcionalidad de chat con IA no está disponible en este momento.");
     }
 
-    Logger.log("ApiService.generateGPTResponse: Generando respuesta GPT...");
-    // Logger.debug("ApiService.generateGPTResponse: Mensajes enviados a GPT", messages); // Puede ser muy largo
+    Logger.log("ApiService.generateClaudeResponse: Generando respuesta con Claude...");
 
     try {
-      // Llamada a la API con reintentos usando Utils.retry
-      const completion = await Utils.retry(async () =>
-        await openai.chat.completions.create({
-          model: CONFIG.GPT.MODEL,
+      const response = await Utils.retry(async () =>
+        await anthropic.messages.create({
+          model: CONFIG.CLAUDE.MODEL,
+          max_tokens: CONFIG.CLAUDE.MAX_TOKENS,
+          system: systemPrompt,
           messages: messages,
-          max_tokens: CONFIG.GPT.MAX_TOKENS,
-          temperature: 0.8, // Un punto medio entre determinismo y creatividad
-          // Otros parámetros opcionales: top_p, frequency_penalty, presence_penalty
         })
       );
 
-      // Validar la respuesta de la API
-      const responseText = completion?.choices?.[0]?.message?.content;
+      const responseText = response?.content?.[0]?.text;
       if (!responseText) {
-        Logger.warn("ApiService.generateGPTResponse: Respuesta inesperada o vacía de OpenAI.", completion);
+        Logger.warn("ApiService.generateClaudeResponse: Respuesta inesperada o vacía de Claude.");
         throw new Error("Respuesta inesperada de la API de IA.");
       }
 
-      Logger.log("ApiService.generateGPTResponse: Respuesta GPT generada exitosamente.");
-      return responseText.trim(); // Devolver el texto limpio
+      Logger.log("ApiService.generateClaudeResponse: Respuesta de Claude generada exitosamente.");
+      return responseText.trim();
 
     } catch (error) {
-      Logger.error('ApiService.generateGPTResponse: Error generando respuesta GPT', error);
-      // Intentar extraer un mensaje de error más específico de la respuesta de la API si existe
-      const apiErrorMessage = error.response?.data?.error?.message || error.message;
+      Logger.error('ApiService.generateClaudeResponse: Error generando respuesta con Claude', error);
+      const apiErrorMessage = error.message || 'Error desconocido';
       throw new Error('No pude generar una respuesta de la IA: ' + apiErrorMessage);
     }
   }
@@ -667,25 +653,25 @@ class ApiService {
   static async verifyApis() {
     Logger.log("ApiService.verifyApis: Verificando APIs...");
 
-    // --- Verificar OpenAI (si está configurado) ---
-    if (openai) {
+    // --- Verificar Anthropic/Claude (si está configurado) ---
+    if (anthropic) {
       try {
-        Logger.log("ApiService.verifyApis: Verificando OpenAI...");
-        const testResponse = await openai.chat.completions.create({
-          model: "gpt-3.5-turbo",
-          messages: [{ role: "user", content: "Test connection" }],
-          max_tokens: 5
+        Logger.log("ApiService.verifyApis: Verificando Anthropic (Claude)...");
+        const testResponse = await anthropic.messages.create({
+          model: CONFIG.CLAUDE.MODEL,
+          max_tokens: 10,
+          messages: [{ role: "user", content: "Responde solo 'OK'." }],
         });
-        if (testResponse.choices?.length > 0) {
-          Logger.log("ApiService.verifyApis: ✅ Conexión con OpenAI verificada.");
+        if (testResponse?.content?.[0]?.text) {
+          Logger.log("ApiService.verifyApis: ✅ Conexión con Anthropic (Claude) verificada.");
         } else {
-          Logger.warn("ApiService.verifyApis: ⚠️ OpenAI respondió sin contenido esperado. GPT podría no funcionar correctamente.");
+          Logger.warn("ApiService.verifyApis: ⚠️ Anthropic respondió sin contenido esperado. Claude podría no funcionar correctamente.");
         }
       } catch (error) {
-        Logger.error("ApiService.verifyApis: ❌ Error verificando conexión con OpenAI. GPT podría no funcionar correctamente.", error);
+        Logger.error("ApiService.verifyApis: ❌ Error verificando conexión con Anthropic (Claude). Chat con IA podría no funcionar correctamente.", error);
       }
     } else {
-      Logger.warn("ApiService.verifyApis: Saltando verificación de OpenAI (API Key no proporcionada).");
+      Logger.warn("ApiService.verifyApis: Saltando verificación de Anthropic (API Key no proporcionada).");
     }
 
     // --- Verificar ElevenLabs (opcional - si falla, se deshabilita la funcionalidad de voz) ---
@@ -737,7 +723,7 @@ class ApiService {
       Logger.warn("ApiService.verifyApis: Saltando verificación de ElevenLabs (ELEVEN_API_KEY no configurada). Funcionalidad de voz deshabilitada.");
     }
 
-    Logger.log(`ApiService.verifyApis: Verificación de APIs completada. ElevenLabs: ${elevenLabsAvailable ? 'OK' : 'No disponible'}, OpenAI: ${openai ? 'Configurado' : 'No configurado'}.`);
+    Logger.log(`ApiService.verifyApis: Verificación de APIs completada. ElevenLabs: ${elevenLabsAvailable ? 'OK' : 'No disponible'}, Claude: ${anthropic ? 'Configurado' : 'No configurado'}.`);
   }
 }
 
@@ -832,10 +818,10 @@ class JavierBot {
   setupCommands() {
     Logger.log("JavierBot.setupCommands: Configurando comandos...");
     this.bot.command(['start', 'help'], this.handleHelp.bind(this)); // Comando de ayuda
-    this.bot.command('t', this.handleTextCommand.bind(this));         // Comando para procesar con GPT y responder texto
+    this.bot.command('t', this.handleTextCommand.bind(this));         // Comando para procesar con Claude y responder texto
     this.bot.command('tv', this.handleTextToVoiceCommand.bind(this));// Comando para convertir texto a voz directamente
     this.bot.command('vv', this.handleVoiceToVoiceCommand.bind(this));// Comando para iniciar transformación de voz a voz
-    this.bot.command('reset', this.handleResetConversation.bind(this));// Comando para reiniciar historial GPT
+    this.bot.command('reset', this.handleResetConversation.bind(this));// Comando para reiniciar historial de conversación
     // Aquí se podrían añadir comandos solo para administradores en el futuro
     // this.bot.command('admincmd', this.handleAdminCommand.bind(this));
   }
@@ -895,7 +881,7 @@ class JavierBot {
 Puedes conversar conmigo como si estuvieras hablando con Javier Soto.
 
 Comandos:
-/t mensaje - Procesa el mensaje con GPT y responde con texto (si GPT está habilitado).
+/t mensaje - Procesa el mensaje con Claude y responde con texto (si está habilitado).
 /tv [opciones] "mensaje" - Convierte el mensaje directamente a voz.
    Opciones (opcionales):
     <code>-s valor</code> : Estabilidad (0.0 a 1.0, +estable vs +expresivo, default: ${CONFIG.ELEVEN_LABS.STABILITY})
@@ -903,7 +889,7 @@ Comandos:
     <code>-v valor</code> : Velocidad (0.7 a 1.2, default: ${CONFIG.ELEVEN_LABS.SPEED})
     <i>Ejemplo:</i> <code>/tv -s 0.4 -v 1.1 "Este es un mensaje de prueba."</code>
 /vv - Pide un mensaje de voz/audio para transformarlo a la voz de Javier. Envía el audio después de usar este comando.
-/reset - Reinicia tu conversación actual con GPT.
+/reset - Reinicia tu conversación actual.
 /help - Mostrar esta ayuda.
 
 Consejos para ElevenLabs (/tv):
@@ -912,7 +898,7 @@ Consejos para ElevenLabs (/tv):
 • Usa tags para pausas: <code><break /></code> (corta) o <code><break time="Xs"/></code> (X segundos).
     <i>Ejemplo de texto para /tv:</i> <code>"Hola <break time="0.7s"/> ¿cómo estás? <break /> Espero que bien."</code>
 
-Simplemente escribe un mensaje para hablar conmigo (usará GPT si está habilitado).
+Simplemente escribe un mensaje para hablar conmigo (usará Claude si está habilitado).
 
 Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballero]</a> para Javier Soto.
     `;
@@ -941,13 +927,13 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
     }
   }
 
-  /** Maneja el comando /t: procesa con GPT y responde texto. */
+  /** Maneja el comando /t: procesa con Claude y responde texto. */
   async handleTextCommand(ctx) {
     const userId = ctx.from.id;
     Logger.log(`Handler: /t solicitado por usuario ${userId}`);
 
-    // Verificar si GPT está habilitado
-    if (!openai) {
+    // Verificar si Claude está habilitado
+    if (!anthropic) {
       await ctx.reply('⚠️ La función de chat con IA (/t) está desactivada.').catch(()=>{});
       return;
     }
@@ -964,8 +950,8 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
     const userMessage = textMatch[1].trim(); // Texto proporcionado por el usuario
     Logger.log(`Handler: /t procesando mensaje: "${userMessage.substring(0, 50)}..."`);
 
-    // Llamar a la función que maneja la lógica de GPT
-    await this.processGPTMessage(ctx, userMessage);
+    // Llamar a la función que maneja la lógica de Claude
+    await this.processClaudeMessage(ctx, userMessage);
   }
 
   /** Maneja el comando /t2v: convierte texto a voz con opciones. */
@@ -1142,13 +1128,13 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
     }
   }
 
-  /** Maneja el comando /reset: limpia el historial de conversación GPT. */
+  /** Maneja el comando /reset: limpia el historial de conversación. */
   async handleResetConversation(ctx) {
     const userId = ctx.from.id;
     Logger.log(`Handler: /reset solicitado por usuario ${userId}`);
 
-    // No hacer nada si GPT está deshabilitado
-    if (!openai) {
+    // No hacer nada si Claude está deshabilitado
+    if (!anthropic) {
       await ctx.reply('⚠️ La función de chat con IA no está activa, no hay conversación que reiniciar.').catch(()=>{});
       return;
     }
@@ -1185,17 +1171,17 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       // Si se esperaba audio y llega texto, cancelar V2V y avisar
       await ctx.reply('🎙️ Estaba esperando un mensaje de voz o audio para transformar (/v2v). Como enviaste texto, he cancelado esa operación. Usa /v2v de nuevo si necesitas transformar un audio.').catch(()=>{});
       this.stateManager.clearPendingVoiceTransformation(userId); // Limpiar estado V2V
-      return; // No procesar como mensaje GPT
+      return; // No procesar como mensaje de chat
     }
 
-    // 2. Verificar si GPT está habilitado
-    if (!openai) {
-      await ctx.reply('⚠️ La función de chat con IA está desactivada. Solo los comandos /t2v, /v2v y /help están disponibles.').catch(()=>{});
+    // 2. Verificar si Claude está habilitado
+    if (!anthropic) {
+      await ctx.reply('⚠️ La función de chat con IA está desactivada. Solo los comandos /tv, /vv y /help están disponibles.').catch(()=>{});
       return;
     }
 
-    // 3. Si no había V2V pendiente y GPT está activo, procesar con GPT
-    await this.processGPTMessage(ctx, userMessage);
+    // 3. Si no había V2V pendiente y Claude está activo, procesar con Claude
+    await this.processClaudeMessage(ctx, userMessage);
   }
 
   /** Maneja mensajes de voz (grabados directamente en Telegram). */
@@ -1235,79 +1221,61 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
   // -----------------------------------------------------
 
   /**
-   * Procesa un mensaje de usuario con GPT, actualiza el historial y envía la respuesta.
+   * Procesa un mensaje de usuario con Claude, actualiza el historial y envía la respuesta.
    * @param {import('telegraf').Context} ctx - Contexto de Telegraf.
    * @param {string} userMessage - Mensaje del usuario a procesar.
    */
-  async processGPTMessage(ctx, userMessage) {
+  async processClaudeMessage(ctx, userMessage) {
     const userId = ctx.from.id;
 
-    // Doble verificación por si acaso se llama incorrectamente
-    if (!openai) {
-      Logger.warn(`processGPTMessage: Llamado para ${userId} pero OpenAI no disponible.`);
+    if (!anthropic) {
+      Logger.warn(`processClaudeMessage: Llamado para ${userId} pero Anthropic no disponible.`);
       await ctx.reply('⚠️ La función de chat con IA no está disponible.').catch(()=>{});
       return;
     }
 
-    // Verificar si ya hay otra operación larga en curso para este usuario
     if (this.stateManager.hasPendingOperation(userId)) {
-      Logger.warn(`processGPTMessage: Usuario ${userId} ya tiene operación pendiente.`);
+      Logger.warn(`processClaudeMessage: Usuario ${userId} ya tiene operación pendiente.`);
       await ctx.reply('⏳ Ya estoy procesando tu solicitud anterior. Por favor, espera.').catch(()=>{});
       return;
     }
 
-    // Marcar inicio de operación GPT
-    this.stateManager.setPendingOperation(userId, 'gpt_generating');
-    let loadingMessage = null; // Para feedback visual
+    this.stateManager.setPendingOperation(userId, 'claude_generating');
+    let loadingMessage = null;
 
     try {
-      // Feedback inicial para el usuario
       loadingMessage = await ctx.reply('🤔 Pensando...').catch(()=>{});
       if (loadingMessage) await ctx.telegram.sendChatAction(ctx.chat.id, 'typing').catch(()=>{});
 
-      // Añadir mensaje del usuario al historial de conversación
       this.stateManager.addMessageToConversation(userId, 'user', userMessage);
-
-      // Obtener el historial completo (incluyendo prompt del sistema)
       const conversation = this.stateManager.getConversation(userId);
+      const systemPrompt = this.stateManager.getSystemPrompt();
 
-      // Llamar a la API de GPT para generar la respuesta
-      const gptResponse = await ApiService.generateGPTResponse(conversation);
-      // Logger.log(`processGPTMessage: Respuesta GPT para ${userId}: "${gptResponse.substring(0, 70)}..."`); // Verboso
+      const claudeResponse = await ApiService.generateClaudeResponse(conversation, systemPrompt);
 
-      // Añadir la respuesta del asistente (GPT) al historial
-      this.stateManager.addMessageToConversation(userId, 'assistant', gptResponse);
+      this.stateManager.addMessageToConversation(userId, 'assistant', claudeResponse);
 
-      // Enviar la respuesta al usuario
-      // Intentar editar el mensaje "Pensando..." con la respuesta
       if (loadingMessage) {
-        await ctx.telegram.editMessageText(ctx.chat.id, loadingMessage.message_id, undefined, gptResponse)
+        await ctx.telegram.editMessageText(ctx.chat.id, loadingMessage.message_id, undefined, claudeResponse)
           .catch(async (editError) => {
-            // Si la edición falla (ej. mensaje muy largo), enviar como mensaje nuevo y borrar el de carga
-            Logger.warn(`processGPTMessage: Falló edición de mensaje para ${userId}, enviando nuevo.`, editError);
-            await ctx.reply(gptResponse).catch(e => Logger.error(`processGPTMessage: Error enviando respuesta GPT (fallback) a ${userId}`, e));
-            await ctx.deleteMessage(loadingMessage.message_id).catch(()=>{}); // Intentar borrar el "Pensando..."
+            Logger.warn(`processClaudeMessage: Falló edición de mensaje para ${userId}, enviando nuevo.`, editError);
+            await ctx.reply(claudeResponse).catch(e => Logger.error(`processClaudeMessage: Error enviando respuesta (fallback) a ${userId}`, e));
+            await ctx.deleteMessage(loadingMessage.message_id).catch(()=>{});
           });
       } else {
-        // Si no se pudo enviar el mensaje "Pensando...", enviar la respuesta directamente
-        await ctx.reply(gptResponse).catch(e => Logger.error(`processGPTMessage: Error enviando respuesta GPT a ${userId}`, e));
+        await ctx.reply(claudeResponse).catch(e => Logger.error(`processClaudeMessage: Error enviando respuesta a ${userId}`, e));
       }
-      // Logger.log(`processGPTMessage: Respuesta de texto GPT enviada a ${userId}`); // Verboso
 
     } catch (error) {
-      // Manejo de errores durante el proceso GPT
-      Logger.error(`processGPTMessage: Error procesando mensaje GPT para ${userId}`, error);
+      Logger.error(`processClaudeMessage: Error procesando mensaje para ${userId}`, error);
       const userErrorMessage = `❌ Error al contactar con la IA: ${error.message || 'Error desconocido'}`;
-      // Informar al usuario del error (editando o enviando nuevo)
       if (loadingMessage) {
         await ctx.telegram.editMessageText(ctx.chat.id, loadingMessage.message_id, undefined, userErrorMessage).catch(async () => await ctx.reply(userErrorMessage).catch(()=>{}));
       } else {
         await ctx.reply(userErrorMessage).catch(()=>{});
       }
     } finally {
-      // Limpiar la marca de operación pendiente (SIEMPRE)
       this.stateManager.clearPendingOperation(userId);
-      // Logger.log(`processGPTMessage: Operación GPT finalizada para ${userId}`); // Verboso
     }
   }
 
@@ -1324,7 +1292,7 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
     // para evitar que múltiples audios enviados rápidamente se procesen para la misma solicitud /v2v.
     this.stateManager.clearPendingVoiceTransformation(userId);
 
-    // Verificar si hay OTRA operación larga ya en curso (GPT, TTS, u otro V2V iniciado antes)
+    // Verificar si hay OTRA operación larga ya en curso (Claude, TTS, u otro V2V iniciado antes)
     if (this.stateManager.hasPendingOperation(userId)) {
       Logger.warn(`processVoiceTransformation: Usuario ${userId} envió audio para V2V pero ya tenía otra operación pendiente.`);
       await ctx.reply('⏳ Ya estoy procesando tu solicitud anterior. Por favor, espera antes de enviar el audio para transformar.').catch(()=>{});
@@ -1469,7 +1437,7 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       Logger.log("===================================================");
       Logger.log(`✅ Bot @${this.bot.botInfo.username} iniciado y escuchando!`);
       Logger.log(`   ID del Bot: ${this.bot.botInfo.id}`);
-      Logger.log(`   OpenAI (GPT): ${openai ? '✅ Habilitado' : '❌ Deshabilitado'}`);
+      Logger.log(`   Claude (Chat IA): ${anthropic ? '✅ Habilitado' : '❌ Deshabilitado'}`);
       Logger.log(`   ElevenLabs (Voz): ${elevenLabsAvailable ? '✅ Habilitado' : '❌ Deshabilitado'}`);
       Logger.log("===================================================");
 
@@ -1506,7 +1474,7 @@ async function main() {
     Logger.error('!!    AUTHORIZED_USERS=ID_USUARIO_1,ID_USUARIO_2,...         !!');
     Logger.error('!!                                                          !!');
     Logger.error('!!  Opcionales recomendadas:                                !!');
-    Logger.error('!!    OPENAI_API_KEY=TU_CLAVE_DE_OPENAI (para chat IA)       !!');
+    Logger.error('!!    ANTHROPIC_API_KEY=TU_CLAVE_DE_ANTHROPIC (para chat IA)  !!');
     Logger.error('!!    ELEVEN_VOICE_ID=ID_DE_TU_VOZ_CLONADA (o usa default)   !!');
     Logger.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!');
     process.exit(1); // Salir si no hay .env
