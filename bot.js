@@ -818,25 +818,46 @@ class JavierBot {
 
 Puedes conversar conmigo como si estuvieras hablando con Javier Soto.
 
-Comandos:
-/t mensaje - Procesa el mensaje con Claude y responde con texto (si está habilitado).
-/tv [opciones] "mensaje" - Convierte el mensaje directamente a voz.
-   Opciones (opcionales):
-    <code>-s valor</code> : Estabilidad (0.0 a 1.0, +estable vs +expresivo, default: ${CONFIG.ELEVEN_LABS.STABILITY})
-    <code>-x valor</code> : Exageración Estilo (>= 0.0, default: ${CONFIG.ELEVEN_LABS.STYLE})
-    <code>-v valor</code> : Velocidad (0.7 a 1.2, default: ${CONFIG.ELEVEN_LABS.SPEED})
-    <i>Ejemplo:</i> <code>/tv -s 0.4 -v 1.1 "Este es un mensaje de prueba."</code>
-/vv - Pide un mensaje de voz/audio para transformarlo a la voz de Javier. Envía el audio después de usar este comando.
-/reset - Reinicia tu conversación actual.
+<b>Comandos:</b>
+/t mensaje - Procesa el mensaje con IA y responde con texto.
+/tv [opciones] mensaje - Convierte texto a voz de Javier.
+/vv - Transforma un audio a la voz de Javier.
+/reset - Reinicia tu conversación.
 /help - Mostrar esta ayuda.
 
-Consejos para ElevenLabs (/tv):
-• Añade pausas naturales con puntos suspensivos (...)
-• Usa expresiones como "Mmm...", "Eh..." para sonar más natural.
-• Usa tags para pausas: <code><break /></code> (corta) o <code><break time="Xs"/></code> (X segundos).
-    <i>Ejemplo de texto para /tv:</i> <code>"Hola <break time="0.7s"/> ¿cómo estás? <break /> Espero que bien."</code>
+<b>Emociones para /tv:</b>
+<code>/tv -e emocion tu mensaje aquí</code>
 
-Simplemente escribe un mensaje para hablar conmigo (usará Claude si está habilitado).
+Emociones disponibles:
+• <code>neutro</code> - Tono equilibrado
+• <code>tranquilo</code> - Calmado y pausado
+• <code>triste</code> - Melancólico
+• <code>serio</code> - Formal y contenido
+• <code>enfadado</code> - Irritado, con intensidad
+• <code>energico</code> - Animado, con fuerza
+• <code>alegre</code> - Contento, positivo
+• <code>dramatico</code> - Máxima expresividad
+• <code>susurro</code> - Muy suave, íntimo
+• <code>narracion</code> - Estilo narrador documental
+
+<i>Ejemplos:</i>
+<code>/tv -e alegre Qué gran día de rodaje hoy</code>
+<code>/tv -e dramatico Y entonces... todo se derrumbó</code>
+<code>/tv -e enfadado Esto no puede seguir así</code>
+
+<b>Opciones avanzadas:</b>
+<code>-s valor</code> : Estabilidad (0.0-1.0, bajo=más expresivo)
+<code>-x valor</code> : Estilo (0.0+, alto=más exagerado)
+<code>-v valor</code> : Velocidad (0.7-1.2)
+Se pueden combinar: <code>/tv -e alegre -v 1.1 Vamos allá</code>
+
+<b>Trucos de dicción:</b>
+• Puntos suspensivos (...) = pausas naturales
+• "Mmm...", "Eh..." = muletillas realistas
+• Signos de exclamación = más énfasis
+• <code>&lt;break time="0.5s"/&gt;</code> = pausa exacta
+
+Escribe cualquier mensaje para hablar conmigo directamente.
 
 Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballero]</a> para Javier Soto.
     `;
@@ -904,52 +925,76 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       return;
     }
 
+    // --- Presets de emoción ---
+    const EMOTION_PRESETS = {
+      neutro:    { stability: 0.50, style: 0.30, speed: 1.0 },
+      tranquilo: { stability: 0.70, style: 0.20, speed: 0.9 },
+      triste:    { stability: 0.25, style: 0.60, speed: 0.85 },
+      serio:     { stability: 0.65, style: 0.15, speed: 0.95 },
+      enfadado:  { stability: 0.20, style: 0.90, speed: 1.1 },
+      energico:  { stability: 0.15, style: 0.95, speed: 1.15 },
+      alegre:    { stability: 0.25, style: 0.80, speed: 1.1 },
+      dramatico: { stability: 0.10, style: 1.00, speed: 0.9 },
+      susurro:   { stability: 0.80, style: 0.10, speed: 0.85 },
+      narracion: { stability: 0.45, style: 0.40, speed: 0.95 },
+    };
+
     // --- 1. Parsear Argumentos y Texto ---
-    const parts = messageText.split(/\s+/); // Dividir por uno o más espacios
+    const parts = messageText.split(/\s+/);
     parts.shift(); // Quitar el comando "/t2v"
 
-    const overrideOptions = {}; // Objeto para guardar las opciones -s, -x, -v
-    const textParts = [];       // Array para guardar las partes del texto a convertir
-    let currentFlag = null;     // Guarda el último flag encontrado (-s, -x, -v)
-    let parsingError = null;    // Guarda el primer error de parsing encontrado
+    const overrideOptions = {};
+    const textParts = [];
+    let currentFlag = null;
+    let parsingError = null;
 
-    // Iterar sobre las partes del mensaje después del comando
     for (const part of parts) {
-      if (part === '-s') { currentFlag = 'stability'; continue; } // Encontrado flag -s
-      if (part === '-x') { currentFlag = 'style'; continue; }     // Encontrado flag -x
-      if (part === '-v') { currentFlag = 'speed'; continue; }     // Encontrado flag -v
+      if (part === '-s') { currentFlag = 'stability'; continue; }
+      if (part === '-x') { currentFlag = 'style'; continue; }
+      if (part === '-v') { currentFlag = 'speed'; continue; }
+      if (part === '-e') { currentFlag = 'emotion'; continue; }
 
-      // Si teníamos un flag esperando un valor...
       if (currentFlag) {
-        const value = parseFloat(part); // Intentar convertir la parte a número
-        if (!isNaN(value)) {
-          // Si es un número válido, guardarlo en las opciones
-          // La validación de rango final la hará ApiService.generateVoice
-          if (currentFlag === 'stability') overrideOptions.stability = value;
-          else if (currentFlag === 'style') overrideOptions.style = value;
-          else if (currentFlag === 'speed') overrideOptions.speed = value;
+        if (currentFlag === 'emotion') {
+          const emotionName = part.toLowerCase();
+          const preset = EMOTION_PRESETS[emotionName];
+          if (preset) {
+            Object.assign(overrideOptions, preset);
+            Logger.log(`Handler: /t2v Preset de emoción '${emotionName}' aplicado para ${userId}`);
+          } else {
+            parsingError = `Emoción '${part}' no reconocida. Disponibles: ${Object.keys(EMOTION_PRESETS).join(', ')}`;
+            Logger.warn(`Handler: /t2v ${parsingError}`);
+            break;
+          }
         } else {
-          // Si no es un número, registrar error y detener parsing (o se podría continuar ignorando)
-          parsingError = `Se esperaba un número después de -${currentFlag.charAt(0)}, pero se recibió '${part}'.`;
-          Logger.warn(`Handler: /t2v Error parsing para ${userId}: ${parsingError}`);
-          break; // Detener el bucle al encontrar un error
+          const value = parseFloat(part);
+          if (!isNaN(value)) {
+            if (currentFlag === 'stability') overrideOptions.stability = value;
+            else if (currentFlag === 'style') overrideOptions.style = value;
+            else if (currentFlag === 'speed') overrideOptions.speed = value;
+          } else {
+            parsingError = `Se esperaba un número después de -${currentFlag.charAt(0)}, pero se recibió '${part}'.`;
+            Logger.warn(`Handler: /t2v Error parsing para ${userId}: ${parsingError}`);
+            break;
+          }
         }
-        currentFlag = null; // Resetear el flag, ya se consumió el valor o hubo error
+        currentFlag = null;
       } else {
-        // Si no hay flag pendiente, esta parte pertenece al texto a convertir
         textParts.push(part);
       }
     }
 
-    // Verificar si quedó un flag sin valor al final y no hubo otro error antes
     if (currentFlag && !parsingError) {
-      parsingError = `La opción -${currentFlag.charAt(0)} se especificó al final sin un valor.`;
+      if (currentFlag === 'emotion') {
+        parsingError = `La opción -e necesita un valor. Disponibles: ${Object.keys(EMOTION_PRESETS).join(', ')}`;
+      } else {
+        parsingError = `La opción -${currentFlag.charAt(0)} se especificó al final sin un valor.`;
+      }
       Logger.warn(`Handler: /t2v Error parsing para ${userId}: ${parsingError}`);
     }
 
-    // Si hubo algún error de parsing, notificar al usuario y salir
     if (parsingError) {
-      await ctx.reply(`⚠️ Error en las opciones: ${parsingError}\nUso correcto: \`/t2v [-s 0.5] [-x 0.8] [-v 1.1] "Tu mensaje aquí"\``, { parse_mode: 'MarkdownV2' }).catch(()=>{});
+      await ctx.reply(`⚠️ Error en las opciones: ${parsingError}\nUso: /tv [-e emocion] [-s 0.5] [-x 0.8] [-v 1.1] texto`).catch(()=>{});
       return;
     }
 
@@ -1002,11 +1047,8 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       if (loadingMessage) await ctx.telegram.editMessageText(ctx.chat.id, loadingMessage.message_id, undefined, '📤 Enviando mensaje de voz...').catch(()=>{});
       if (loadingMessage) await ctx.telegram.sendChatAction(ctx.chat.id, 'upload_voice').catch(()=>{});
 
-      // Enviar el archivo de audio con metadatos para evitar reproducción en cadena
-      await ctx.replyWithAudio(
-        { source: fs.createReadStream(audioFilePath), filename: `javier_soto_${Date.now()}.mp3` },
-        { title: textToConvert.substring(0, 40), performer: 'Javier Soto' }
-      );
+      // Enviar como mensaje de voz (no como audio/música) para evitar reproducción en cadena
+      await ctx.replyWithVoice({ source: fs.createReadStream(audioFilePath) });
       Logger.log(`Handler: /t2v Mensaje de voz enviado con éxito a usuario ${userId}`);
 
       // Eliminar el mensaje de "cargando" si se envió
@@ -1314,11 +1356,8 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       }
       Logger.log(`processVoiceTransformation: Intentando enviar archivo de voz transformado: ${transformedFilePath}`);
 
-      // Enviar como audio con metadatos para evitar reproducción en cadena
-      await ctx.replyWithAudio(
-        { source: fs.createReadStream(transformedFilePath), filename: `javier_soto_v2v_${Date.now()}.mp3` },
-        { title: 'Voz transformada', performer: 'Javier Soto' }
-      );
+      // Enviar como mensaje de voz (no como audio/música) para evitar reproducción en cadena
+      await ctx.replyWithVoice({ source: fs.createReadStream(transformedFilePath) });
       Logger.log(`processVoiceTransformation: Mensaje de voz transformado (V2V) enviado con éxito a ${userId}`);
 
       // Eliminar el mensaje de "cargando"
