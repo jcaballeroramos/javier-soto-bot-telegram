@@ -76,6 +76,10 @@ const CONFIG = {
     TELEGRAM_TIMEOUT: 60000, // Timeout para llamadas a la API de Telegram (ms)
     MAX_RETRIES: 3,          // Máximo de reintentos para operaciones fallidas (APIs)
     RETRY_DELAY: 5000,       // Delay base antes del primer reintento (ms)
+    MAX_TTS_TEXT_LENGTH: 1000, // Longitud máxima de texto para TTS (caracteres)
+    MAX_DOWNLOAD_SIZE: 20 * 1024 * 1024, // Tamaño máximo de archivo descargado (20MB)
+    RATE_LIMIT_WINDOW: 60000,  // Ventana de rate limiting (1 minuto)
+    RATE_LIMIT_MAX: 10,        // Máximo de operaciones por ventana
   },
   /** Configuraciones para Claude (Anthropic) */
   CLAUDE: {
@@ -274,6 +278,8 @@ class StateManager {
     this.conversations = new Map();         // Historial de conversación por User ID
     /** @type {Map<number, number>} */
     this.pendingVoiceTransformations = new Map(); // User ID -> message_id que inició el comando /v2v
+    /** @type {Map<number, number[]>} */
+    this.rateLimits = new Map();              // User ID -> array de timestamps de operaciones
   }
 
   // --- Métodos de Autorización ---
@@ -284,6 +290,21 @@ class StateManager {
   /** Verifica si un User ID es administrador. */
   isAdmin(userId) {
     return userId && this.adminUsers.has(userId);
+  }
+
+  // --- Rate Limiting ---
+  /** Verifica si un usuario ha excedido el límite de operaciones. Devuelve true si está limitado. */
+  isRateLimited(userId) {
+    const now = Date.now();
+    const timestamps = this.rateLimits.get(userId) || [];
+    // Filtrar solo los timestamps dentro de la ventana
+    const recent = timestamps.filter(t => now - t < CONFIG.BOT.RATE_LIMIT_WINDOW);
+    this.rateLimits.set(userId, recent);
+    if (recent.length >= CONFIG.BOT.RATE_LIMIT_MAX) {
+      return true;
+    }
+    recent.push(now);
+    return false;
   }
 
   // --- Métodos de Sesión ---
@@ -941,7 +962,17 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       return;
     }
 
-    // --- 2. Verificar Operación Pendiente ---
+    // Verificar longitud máxima del texto
+    if (textToConvert.length > CONFIG.BOT.MAX_TTS_TEXT_LENGTH) {
+      await ctx.reply(`⚠️ El texto es demasiado largo (${textToConvert.length} caracteres). El máximo es ${CONFIG.BOT.MAX_TTS_TEXT_LENGTH} caracteres.`).catch(()=>{});
+      return;
+    }
+
+    // --- 2. Verificar Rate Limiting y Operación Pendiente ---
+    if (this.stateManager.isRateLimited(userId)) {
+      await ctx.reply('⏳ Demasiadas solicitudes. Espera un momento antes de enviar otra.').catch(()=>{});
+      return;
+    }
     if (this.stateManager.hasPendingOperation(userId)) {
       Logger.warn(`Handler: /t2v Usuario ${userId} ya tiene operación pendiente.`);
       await ctx.reply('⏳ Ya estoy procesando tu solicitud anterior. Por favor, espera un momento.').catch(()=>{});
@@ -1022,7 +1053,11 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       return;
     }
 
-    // Verificar si ya hay otra operación larga en curso
+    // Verificar rate limiting y operación pendiente
+    if (this.stateManager.isRateLimited(userId)) {
+      await ctx.reply('⏳ Demasiadas solicitudes. Espera un momento antes de enviar otra.').catch(()=>{});
+      return;
+    }
     if (this.stateManager.hasPendingOperation(userId)) {
       Logger.warn(`Handler: /v2v Usuario ${userId} ya tiene operación pendiente.`);
       await ctx.reply('⏳ Ya estoy procesando tu solicitud anterior. Por favor, espera.').catch(()=>{});
@@ -1153,6 +1188,10 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       return;
     }
 
+    if (this.stateManager.isRateLimited(userId)) {
+      await ctx.reply('⏳ Demasiadas solicitudes. Espera un momento antes de enviar otra.').catch(()=>{});
+      return;
+    }
     if (this.stateManager.hasPendingOperation(userId)) {
       Logger.warn(`processClaudeMessage: Usuario ${userId} ya tiene operación pendiente.`);
       await ctx.reply('⏳ Ya estoy procesando tu solicitud anterior. Por favor, espera.').catch(()=>{});
@@ -1242,9 +1281,12 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
         responseType: 'arraybuffer' // Descargar como datos binarios
       });
 
-      // Validar descarga
+      // Validar descarga y tamaño
       if (!downloadResponse.data || downloadResponse.data.length === 0) {
         throw new Error("La descarga del archivo de audio desde Telegram falló o el archivo está vacío.");
+      }
+      if (downloadResponse.data.length > CONFIG.BOT.MAX_DOWNLOAD_SIZE) {
+        throw new Error(`El archivo de audio es demasiado grande (${Math.round(downloadResponse.data.length / 1024 / 1024)}MB). Máximo: ${CONFIG.BOT.MAX_DOWNLOAD_SIZE / 1024 / 1024}MB.`);
       }
 
       // Guardar archivo descargado temporalmente
