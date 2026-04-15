@@ -960,6 +960,7 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
           const preset = EMOTION_PRESETS[emotionName];
           if (preset) {
             Object.assign(overrideOptions, preset);
+            overrideOptions._emotionName = emotionName;
             Logger.log(`Handler: /t2v Preset de emoción '${emotionName}' aplicado para ${userId}`);
           } else {
             parsingError = `Emoción '${part}' no reconocida. Disponibles: ${Object.keys(EMOTION_PRESETS).join(', ')}`;
@@ -1047,8 +1048,13 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       if (loadingMessage) await ctx.telegram.editMessageText(ctx.chat.id, loadingMessage.message_id, undefined, '📤 Enviando mensaje de voz...').catch(()=>{});
       if (loadingMessage) await ctx.telegram.sendChatAction(ctx.chat.id, 'upload_voice').catch(()=>{});
 
-      // Enviar como mensaje de voz (no como audio/música) para evitar reproducción en cadena
-      await ctx.replyWithVoice({ source: fs.createReadStream(audioFilePath) });
+      // Enviar como mensaje de voz con caption descriptivo
+      const emotionLabel = overrideOptions._emotionName ? ` (${overrideOptions._emotionName})` : '';
+      const captionText = `🎙️ Javier Soto${emotionLabel}\n"${textToConvert.substring(0, 150)}${textToConvert.length > 150 ? '...' : ''}"`;
+      await ctx.replyWithVoice(
+        { source: fs.createReadStream(audioFilePath) },
+        { caption: captionText }
+      );
       Logger.log(`Handler: /t2v Mensaje de voz enviado con éxito a usuario ${userId}`);
 
       // Eliminar el mensaje de "cargando" si se envió
@@ -1356,8 +1362,11 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       }
       Logger.log(`processVoiceTransformation: Intentando enviar archivo de voz transformado: ${transformedFilePath}`);
 
-      // Enviar como mensaje de voz (no como audio/música) para evitar reproducción en cadena
-      await ctx.replyWithVoice({ source: fs.createReadStream(transformedFilePath) });
+      // Enviar como mensaje de voz con caption descriptivo
+      await ctx.replyWithVoice(
+        { source: fs.createReadStream(transformedFilePath) },
+        { caption: `🎙️ Javier Soto — Voz transformada (V2V)` }
+      );
       Logger.log(`processVoiceTransformation: Mensaje de voz transformado (V2V) enviado con éxito a ${userId}`);
 
       // Eliminar el mensaje de "cargando"
