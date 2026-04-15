@@ -7,9 +7,9 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "@elevenlabs/elevenlabs-js": "^1.0.0",
     "axios": "^1.6.0",
     "dotenv": "^16.3.1",
+    "form-data": "^4.0.0",
     "telegraf": "^4.12.2"
   }
 }

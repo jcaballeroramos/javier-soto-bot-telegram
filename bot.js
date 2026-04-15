@@ -16,11 +16,11 @@ require('dotenv').config();
 // Importar módulos necesarios
 const { Telegraf } = require('telegraf');        // Framework del bot de Telegram
 const Anthropic = require('@anthropic-ai/sdk').default; // Cliente oficial de Anthropic (Claude)
-const { ElevenLabsClient } = require('@elevenlabs/elevenlabs-js'); // Cliente oficial de ElevenLabs
-const axios = require('axios');                // Para descargas HTTP (archivos de Telegram)
+const axios = require('axios');                // Para solicitudes HTTP (ElevenLabs API, descargas de Telegram)
 const fs = require('fs');                      // Módulo File System (para manejar archivos temporales)
 const path = require('path');                  // Módulo Path (para construir rutas de archivos)
 const os = require('os');                      // Módulo OS (para obtener directorio temporal del sistema)
+const FormData = require('form-data');         // Para requests multipart/form-data (V2V)
 
 // -----------------------------------------------------------------------------
 // -- 2. Logger Personalizado                                                 --
@@ -145,21 +145,8 @@ try {
   Logger.error("Error durante la inicialización del cliente Anthropic", error);
 }
 
-// --- Cliente ElevenLabs ---
-let elevenlabs = null;
+// Flag global para indicar si ElevenLabs está disponible (se verifica al inicio)
 let elevenLabsAvailable = false;
-try {
-  if (process.env.ELEVEN_API_KEY) {
-    elevenlabs = new ElevenLabsClient({
-      apiKey: process.env.ELEVEN_API_KEY,
-    });
-    Logger.log("Cliente ElevenLabs inicializado correctamente.");
-  } else {
-    Logger.warn("ELEVEN_API_KEY no encontrada en .env. Funcionalidad de voz estará deshabilitada.");
-  }
-} catch (error) {
-  Logger.error("Error durante la inicialización del cliente ElevenLabs", error);
-}
 
 // -----------------------------------------------------------------------------
 // -- 5. Utilidades Generales                                                 --
@@ -450,8 +437,8 @@ class ApiService {
    * @throws {Error} - Si la API Key no está configurada o la llamada falla.
    */
   static async generateVoice(text, options = {}) {
-    if (!elevenlabs) {
-      Logger.error("ApiService.generateVoice: Cliente ElevenLabs no inicializado.");
+    if (!process.env.ELEVEN_API_KEY) {
+      Logger.error("ApiService.generateVoice: ELEVEN_API_KEY no definida.");
       throw new Error("El servicio de generación de voz no está configurado.");
     }
 
@@ -459,12 +446,11 @@ class ApiService {
     const voiceId = CONFIG.ELEVEN_LABS.VOICE_ID;
     Logger.log(`ApiService.generateVoice: Usando Voice ID (TTS): ${voiceId}`);
 
-    // --- Construir Voice Settings Finales ---
     const finalSettings = {
       stability: options.stability !== undefined
         ? Math.max(0.0, Math.min(1.0, options.stability))
         : CONFIG.ELEVEN_LABS.STABILITY,
-      similarityBoost: options.similarity_boost !== undefined
+      similarity_boost: options.similarity_boost !== undefined
         ? Math.max(0.0, Math.min(1.0, options.similarity_boost))
         : CONFIG.ELEVEN_LABS.SIMILARITY_BOOST,
       style: options.style !== undefined
@@ -473,7 +459,7 @@ class ApiService {
       speed: options.speed !== undefined
         ? Math.max(0.5, Math.min(2.0, options.speed))
         : CONFIG.ELEVEN_LABS.SPEED,
-      useSpeakerBoost: options.use_speaker_boost !== undefined
+      use_speaker_boost: options.use_speaker_boost !== undefined
         ? options.use_speaker_boost
         : CONFIG.ELEVEN_LABS.USE_SPEAKER_BOOST
     };
@@ -481,37 +467,46 @@ class ApiService {
     try {
       Logger.log("ApiService.generateVoice: Enviando solicitud TTS a ElevenLabs...");
 
-      const audioStream = await Utils.retry(async () =>
-        await elevenlabs.textToSpeech.convert(voiceId, {
-          text: text,
-          modelId: CONFIG.ELEVEN_LABS.MODEL,
-          outputFormat: CONFIG.ELEVEN_LABS.OUTPUT_FORMAT,
-          voiceSettings: finalSettings,
+      const response = await Utils.retry(async () =>
+        await axios({
+          method: 'post',
+          url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+          headers: {
+            'Accept': 'audio/mpeg',
+            'xi-api-key': process.env.ELEVEN_API_KEY,
+            'Content-Type': 'application/json'
+          },
+          data: {
+            text: text,
+            model_id: CONFIG.ELEVEN_LABS.MODEL,
+            voice_settings: finalSettings
+          },
+          params: { output_format: CONFIG.ELEVEN_LABS.OUTPUT_FORMAT },
+          responseType: 'arraybuffer'
         })
       );
 
-      // Recopilar el stream en un buffer
-      const chunks = [];
-      for await (const chunk of audioStream) {
-        chunks.push(chunk);
-      }
-      const audioBuffer = Buffer.concat(chunks);
-
-      if (audioBuffer.length === 0) {
-        throw new Error("Respuesta vacía de ElevenLabs API (TTS)");
+      if (response.status !== 200 || !response.data || response.data.length === 0) {
+        throw new Error(`Respuesta inválida de ElevenLabs API (TTS): Status ${response.status}`);
       }
 
-      // Guardar el audio en un archivo temporal
       const tempFilePath = path.join(CONFIG.TMP_DIR, `tts_output_${Date.now()}.mp3`);
       Logger.log(`ApiService.generateVoice: Guardando audio TTS en: ${tempFilePath}`);
-      fs.writeFileSync(tempFilePath, audioBuffer);
-      Logger.log(`ApiService.generateVoice: Audio TTS guardado correctamente (${audioBuffer.length} bytes)`);
+      fs.writeFileSync(tempFilePath, response.data);
+      Logger.log(`ApiService.generateVoice: Audio TTS guardado correctamente (${response.data.length} bytes)`);
 
       return tempFilePath;
 
     } catch (error) {
       Logger.error('ApiService.generateVoice: Error generando voz (TTS)', error);
-      throw new Error(`Error al generar audio (TTS): ${error.message || 'Error desconocido'}`);
+      let errorMessage = error.message;
+      if (error.response?.data) {
+        try {
+          const errorData = Buffer.isBuffer(error.response.data) ? JSON.parse(error.response.data.toString()) : error.response.data;
+          errorMessage = errorData.detail?.message || errorMessage;
+        } catch (e) { /* usar mensaje original */ }
+      }
+      throw new Error(`Error al generar audio (TTS): ${errorMessage}`);
     }
   }
 
@@ -522,8 +517,8 @@ class ApiService {
    * @throws {Error} - Si la API Key no está configurada o la llamada falla.
    */
   static async transformVoice(audioFilePath) {
-    if (!elevenlabs) {
-      Logger.error("ApiService.transformVoice: Cliente ElevenLabs no inicializado.");
+    if (!process.env.ELEVEN_API_KEY) {
+      Logger.error("ApiService.transformVoice: ELEVEN_API_KEY no definida.");
       throw new Error("El servicio de transformación de voz no está configurado.");
     }
 
@@ -537,45 +532,57 @@ class ApiService {
       }
 
       const audioFileBuffer = fs.readFileSync(audioFilePath);
-      const audioBlob = new Blob([audioFileBuffer], { type: 'audio/mpeg' });
+      const formData = new FormData();
+      formData.append('audio', audioFileBuffer, {
+        filename: `input_${path.basename(audioFilePath)}`,
+        contentType: 'audio/mpeg',
+      });
+      formData.append('model_id', CONFIG.ELEVEN_LABS.STS_MODEL);
+      formData.append('voice_settings', JSON.stringify({
+        stability: CONFIG.ELEVEN_LABS.STABILITY,
+        similarity_boost: CONFIG.ELEVEN_LABS.SIMILARITY_BOOST,
+        style: CONFIG.ELEVEN_LABS.STYLE,
+        use_speaker_boost: CONFIG.ELEVEN_LABS.USE_SPEAKER_BOOST,
+      }));
 
       Logger.log("ApiService.transformVoice: Enviando solicitud STS a ElevenLabs...");
 
-      const audioStream = await Utils.retry(async () =>
-        await elevenlabs.speechToSpeech.convert(voiceId, {
-          audio: audioBlob,
-          modelId: CONFIG.ELEVEN_LABS.STS_MODEL,
-          outputFormat: CONFIG.ELEVEN_LABS.OUTPUT_FORMAT,
-          voiceSettings: {
-            stability: CONFIG.ELEVEN_LABS.STABILITY,
-            similarityBoost: CONFIG.ELEVEN_LABS.SIMILARITY_BOOST,
-            style: CONFIG.ELEVEN_LABS.STYLE,
-            useSpeakerBoost: CONFIG.ELEVEN_LABS.USE_SPEAKER_BOOST,
+      const response = await Utils.retry(async () =>
+        await axios({
+          method: 'post',
+          url: `https://api.elevenlabs.io/v1/speech-to-speech/${voiceId}`,
+          headers: {
+            'Accept': 'audio/mpeg',
+            'xi-api-key': process.env.ELEVEN_API_KEY,
+            ...formData.getHeaders()
           },
+          data: formData,
+          params: { output_format: CONFIG.ELEVEN_LABS.OUTPUT_FORMAT },
+          responseType: 'arraybuffer'
         })
       );
 
-      // Recopilar el stream en un buffer
-      const chunks = [];
-      for await (const chunk of audioStream) {
-        chunks.push(chunk);
-      }
-      const audioBuffer = Buffer.concat(chunks);
-
-      if (audioBuffer.length === 0) {
-        throw new Error("Respuesta vacía de ElevenLabs API (STS)");
+      if (response.status !== 200 || !response.data || response.data.length === 0) {
+        throw new Error(`Respuesta inválida de ElevenLabs API (STS): Status ${response.status}`);
       }
 
       const tempFilePath = path.join(CONFIG.TMP_DIR, `sts_output_${Date.now()}.mp3`);
       Logger.log(`ApiService.transformVoice: Guardando audio STS transformado en: ${tempFilePath}`);
-      fs.writeFileSync(tempFilePath, audioBuffer);
-      Logger.log(`ApiService.transformVoice: Audio STS guardado correctamente (${audioBuffer.length} bytes)`);
+      fs.writeFileSync(tempFilePath, response.data);
+      Logger.log(`ApiService.transformVoice: Audio STS guardado correctamente (${response.data.length} bytes)`);
 
       return tempFilePath;
 
     } catch (error) {
       Logger.error('ApiService.transformVoice: Error transformando voz (STS)', error);
-      throw new Error(`Error al transformar audio (STS): ${error.message || 'Error desconocido'}`);
+      let errorMessage = error.message;
+      if (error.response?.data) {
+        try {
+          const errorData = Buffer.isBuffer(error.response.data) ? JSON.parse(error.response.data.toString()) : error.response.data;
+          errorMessage = errorData.detail?.message || errorMessage;
+        } catch (e) { /* usar mensaje original */ }
+      }
+      throw new Error(`Error al transformar audio (STS): ${errorMessage}`);
     }
   }
 
@@ -608,19 +615,26 @@ class ApiService {
     }
 
     // --- Verificar ElevenLabs (opcional - si falla, se deshabilita la funcionalidad de voz) ---
-    if (elevenlabs) {
+    if (process.env.ELEVEN_API_KEY) {
       try {
         Logger.log("ApiService.verifyApis: Verificando ElevenLabs...");
-        // Verificar que la API key es válida obteniendo info de la voz configurada
-        const voiceResponse = await elevenlabs.voices.get(CONFIG.ELEVEN_LABS.VOICE_ID);
-        if (voiceResponse?.voiceId === CONFIG.ELEVEN_LABS.VOICE_ID) {
-          Logger.log(`ApiService.verifyApis: ✅ ElevenLabs verificado. Voice ID (${CONFIG.ELEVEN_LABS.VOICE_ID}) encontrada: ${voiceResponse.name}`);
+        const voiceResponse = await axios({
+          method: 'get',
+          url: `https://api.elevenlabs.io/v1/voices/${CONFIG.ELEVEN_LABS.VOICE_ID}`,
+          headers: { 'xi-api-key': process.env.ELEVEN_API_KEY, 'Accept': 'application/json' }
+        });
+        if (voiceResponse.data?.voice_id === CONFIG.ELEVEN_LABS.VOICE_ID) {
+          Logger.log(`ApiService.verifyApis: ✅ ElevenLabs verificado. Voice ID (${CONFIG.ELEVEN_LABS.VOICE_ID}) encontrada: ${voiceResponse.data.name}`);
           elevenLabsAvailable = true;
         } else {
           Logger.warn(`ApiService.verifyApis: ⚠️ Voice ID (${CONFIG.ELEVEN_LABS.VOICE_ID}) no coincide con la respuesta. Voz deshabilitada.`);
         }
       } catch (error) {
-        Logger.error("ApiService.verifyApis: ❌ Error verificando ElevenLabs. Voz deshabilitada.", error);
+        if (error.response?.status === 401) {
+          Logger.error("ApiService.verifyApis: ❌ ElevenLabs API Key inválida (401). Voz deshabilitada.", error);
+        } else {
+          Logger.error("ApiService.verifyApis: ❌ Error verificando ElevenLabs. Voz deshabilitada.", error);
+        }
       }
     } else {
       Logger.warn("ApiService.verifyApis: Saltando verificación de ElevenLabs (ELEVEN_API_KEY no configurada). Funcionalidad de voz deshabilitada.");
