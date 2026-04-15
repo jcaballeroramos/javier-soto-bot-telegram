@@ -971,9 +971,11 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       if (loadingMessage) await ctx.telegram.editMessageText(ctx.chat.id, loadingMessage.message_id, undefined, '📤 Enviando mensaje de voz...').catch(()=>{});
       if (loadingMessage) await ctx.telegram.sendChatAction(ctx.chat.id, 'upload_voice').catch(()=>{});
 
-      // Enviar el archivo de audio como mensaje de voz
-      // Usar fs.createReadStream para eficiencia con archivos grandes
-      await ctx.replyWithAudio({ source: fs.createReadStream(audioFilePath) });
+      // Enviar el archivo de audio con metadatos para evitar reproducción en cadena
+      await ctx.replyWithAudio(
+        { source: fs.createReadStream(audioFilePath), filename: `javier_soto_${Date.now()}.mp3` },
+        { title: textToConvert.substring(0, 40), performer: 'Javier Soto' }
+      );
       Logger.log(`Handler: /t2v Mensaje de voz enviado con éxito a usuario ${userId}`);
 
       // Eliminar el mensaje de "cargando" si se envió
@@ -1270,8 +1272,11 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       }
       Logger.log(`processVoiceTransformation: Intentando enviar archivo de voz transformado: ${transformedFilePath}`);
 
-      // Enviar como mensaje de voz usando un stream
-      await ctx.replyWithAudio({ source: fs.createReadStream(transformedFilePath) });
+      // Enviar como audio con metadatos para evitar reproducción en cadena
+      await ctx.replyWithAudio(
+        { source: fs.createReadStream(transformedFilePath), filename: `javier_soto_v2v_${Date.now()}.mp3` },
+        { title: 'Voz transformada', performer: 'Javier Soto' }
+      );
       Logger.log(`processVoiceTransformation: Mensaje de voz transformado (V2V) enviado con éxito a ${userId}`);
 
       // Eliminar el mensaje de "cargando"
