@@ -149,6 +149,9 @@ try {
 
 // Nota: El cliente de ElevenLabs (axios) se usa directamente en ApiService, no requiere inicialización aquí.
 
+// Flag global para indicar si ElevenLabs está disponible (se verifica al inicio)
+let elevenLabsAvailable = false;
+
 // -----------------------------------------------------------------------------
 // -- 5. Utilidades Generales                                                 --
 // -----------------------------------------------------------------------------
@@ -192,7 +195,7 @@ class Utils {
    * @returns {boolean} - `true` si todas las variables requeridas están presentes, `false` si falta alguna.
    */
   static validateEnvVars() {
-    const required = ['BOT_TOKEN', 'ELEVEN_API_KEY', 'AUTHORIZED_USERS'];
+    const required = ['BOT_TOKEN', 'AUTHORIZED_USERS'];
     const missing = [];
 
     // Verificar variables requeridas
@@ -205,6 +208,9 @@ class Utils {
     // Avisar sobre opcionales faltantes pero no marcar como error
     if (!process.env.OPENAI_API_KEY) {
         Logger.warn("Utils.validateEnvVars: OPENAI_API_KEY no definida (GPT deshabilitado).");
+    }
+    if (!process.env.ELEVEN_API_KEY) {
+        Logger.warn("Utils.validateEnvVars: ELEVEN_API_KEY no definida (funcionalidad de voz deshabilitada).");
     }
     if (!process.env.ELEVEN_VOICE_ID) {
         Logger.warn(`Utils.validateEnvVars: ELEVEN_VOICE_ID no definida (usando default: ${CONFIG.ELEVEN_LABS.VOICE_ID}).`);
@@ -660,13 +666,11 @@ class ApiService {
    */
   static async verifyApis() {
     Logger.log("ApiService.verifyApis: Verificando APIs...");
-    let allOk = true;
 
     // --- Verificar OpenAI (si está configurado) ---
     if (openai) {
       try {
         Logger.log("ApiService.verifyApis: Verificando OpenAI...");
-        // Usar un modelo rápido y barato para la prueba
         const testResponse = await openai.chat.completions.create({
           model: "gpt-3.5-turbo",
           messages: [{ role: "user", content: "Test connection" }],
@@ -675,18 +679,16 @@ class ApiService {
         if (testResponse.choices?.length > 0) {
           Logger.log("ApiService.verifyApis: ✅ Conexión con OpenAI verificada.");
         } else {
-          Logger.warn("ApiService.verifyApis: ⚠️ OpenAI respondió sin contenido esperado.");
-          allOk = false; // Considerar esto un problema potencial
+          Logger.warn("ApiService.verifyApis: ⚠️ OpenAI respondió sin contenido esperado. GPT podría no funcionar correctamente.");
         }
       } catch (error) {
-        Logger.error("ApiService.verifyApis: ❌ Error verificando conexión con OpenAI", error);
-        allOk = false;
+        Logger.error("ApiService.verifyApis: ❌ Error verificando conexión con OpenAI. GPT podría no funcionar correctamente.", error);
       }
     } else {
       Logger.warn("ApiService.verifyApis: Saltando verificación de OpenAI (API Key no proporcionada).");
     }
 
-    // --- Verificar ElevenLabs (requerido) ---
+    // --- Verificar ElevenLabs (opcional - si falla, se deshabilita la funcionalidad de voz) ---
     if (process.env.ELEVEN_API_KEY) {
       try {
         Logger.log("ApiService.verifyApis: Verificando ElevenLabs...");
@@ -710,46 +712,32 @@ class ApiService {
             // Chequear si la respuesta contiene el mismo voice_id
             if (voiceResponse.data?.voice_id === CONFIG.ELEVEN_LABS.VOICE_ID) {
               Logger.log(`ApiService.verifyApis: ✅ Voice ID (${CONFIG.ELEVEN_LABS.VOICE_ID}) encontrada: ${voiceResponse.data.name}`);
+              elevenLabsAvailable = true;
             } else {
-              // Esto no debería pasar si la llamada fue exitosa, pero por si acaso
-              Logger.warn(`ApiService.verifyApis: ⚠️ Voice ID (${CONFIG.ELEVEN_LABS.VOICE_ID}) configurada no coincide con la respuesta de la API.`);
-              // Podrías decidir si esto es un error fatal o no
-              // allOk = false;
+              Logger.warn(`ApiService.verifyApis: ⚠️ Voice ID (${CONFIG.ELEVEN_LABS.VOICE_ID}) configurada no coincide con la respuesta de la API. Voz deshabilitada.`);
             }
           } catch (voiceError) {
-            // Manejar específicamente el error 404 (Not Found)
             if (voiceError.response?.status === 404) {
-              Logger.error(`ApiService.verifyApis: ❌ Voice ID (${CONFIG.ELEVEN_LABS.VOICE_ID}) configurada NO FUE ENCONTRADA en tu cuenta de ElevenLabs.`);
+              Logger.error(`ApiService.verifyApis: ❌ Voice ID (${CONFIG.ELEVEN_LABS.VOICE_ID}) configurada NO FUE ENCONTRADA en tu cuenta de ElevenLabs. Voz deshabilitada.`);
             } else {
-              // Otro error al intentar obtener la voz
-              Logger.error(`ApiService.verifyApis: ❌ Error verificando existencia de Voice ID (${CONFIG.ELEVEN_LABS.VOICE_ID})`, voiceError);
+              Logger.error(`ApiService.verifyApis: ❌ Error verificando existencia de Voice ID (${CONFIG.ELEVEN_LABS.VOICE_ID}). Voz deshabilitada.`, voiceError);
             }
-            allOk = false; // Considerar error si no se puede verificar la voz
           }
         } else {
-          Logger.warn("ApiService.verifyApis: ⚠️ ElevenLabs respondió, pero la estructura de datos del usuario fue inesperada.");
-          allOk = false;
+          Logger.warn("ApiService.verifyApis: ⚠️ ElevenLabs respondió, pero la estructura de datos del usuario fue inesperada. Voz deshabilitada.");
         }
       } catch (error) {
-        // Manejar errores de conexión o autenticación con ElevenLabs
         if (error.response?.status === 401) {
-             Logger.error("ApiService.verifyApis: ❌ Error verificando ElevenLabs: API Key inválida (Unauthorized).", error);
+             Logger.error("ApiService.verifyApis: ❌ Error verificando ElevenLabs: API Key inválida (Unauthorized). Voz deshabilitada.", error);
         } else {
-             Logger.error("ApiService.verifyApis: ❌ Error verificando conexión con ElevenLabs", error);
+             Logger.error("ApiService.verifyApis: ❌ Error verificando conexión con ElevenLabs. Voz deshabilitada.", error);
         }
-        allOk = false;
       }
     } else {
-      // ElevenLabs es requerido, si no hay clave, es un error fatal
-      Logger.error("ApiService.verifyApis: ❌ Saltando verificación de ElevenLabs (ELEVEN_API_KEY no configurada). ¡Esta API es REQUERIDA!");
-      allOk = false;
+      Logger.warn("ApiService.verifyApis: Saltando verificación de ElevenLabs (ELEVEN_API_KEY no configurada). Funcionalidad de voz deshabilitada.");
     }
 
-    // Si alguna verificación falló, lanzar un error para detener el inicio
-    if (!allOk) {
-      throw new Error("Una o más verificaciones de API fallaron al inicio. Revisa los logs.");
-    }
-    Logger.log("ApiService.verifyApis: ✅ Verificación de APIs completada con éxito.");
+    Logger.log(`ApiService.verifyApis: Verificación de APIs completada. ElevenLabs: ${elevenLabsAvailable ? 'OK' : 'No disponible'}, OpenAI: ${openai ? 'Configurado' : 'No configurado'}.`);
   }
 }
 
@@ -986,6 +974,12 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
     const messageText = ctx.message.text;
     Logger.log(`Handler: /t2v solicitado por ${userId}: "${messageText}"`);
 
+    // Verificar si ElevenLabs está disponible
+    if (!elevenLabsAvailable) {
+      await ctx.reply('⚠️ La funcionalidad de voz no está disponible en este momento (ElevenLabs no configurado o API key inválida).').catch(()=>{});
+      return;
+    }
+
     // --- 1. Parsear Argumentos y Texto ---
     const parts = messageText.split(/\s+/); // Dividir por uno o más espacios
     parts.shift(); // Quitar el comando "/t2v"
@@ -1116,6 +1110,12 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
   async handleVoiceToVoiceCommand(ctx) {
     const userId = ctx.from.id;
     Logger.log(`Handler: /v2v solicitado por usuario ${userId}`);
+
+    // Verificar si ElevenLabs está disponible
+    if (!elevenLabsAvailable) {
+      await ctx.reply('⚠️ La funcionalidad de voz no está disponible en este momento (ElevenLabs no configurado o API key inválida).').catch(()=>{});
+      return;
+    }
 
     // Verificar si ya hay otra operación larga en curso
     if (this.stateManager.hasPendingOperation(userId)) {
@@ -1438,13 +1438,7 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
 
     // 2. Verificar Conectividad y Configuración de APIs (solo si las vars básicas están)
     if (ok) {
-      try {
-        await ApiService.verifyApis(); // Esta función lanza error si algo falla
-      } catch (apiError) {
-        // ApiService.verifyApis ya debería haber logueado el detalle
-        Logger.error("JavierBot.verifyPrerequisites: Falló la verificación de APIs.");
-        ok = false;
-      }
+      await ApiService.verifyApis(); // Verifica APIs pero ya no bloquea el inicio
     }
 
     // Si algo falló, detener el proceso
@@ -1475,6 +1469,8 @@ Desarrollado por <a href="https://artefactofilms.com/">Artefacto [Jorge Caballer
       Logger.log("===================================================");
       Logger.log(`✅ Bot @${this.bot.botInfo.username} iniciado y escuchando!`);
       Logger.log(`   ID del Bot: ${this.bot.botInfo.id}`);
+      Logger.log(`   OpenAI (GPT): ${openai ? '✅ Habilitado' : '❌ Deshabilitado'}`);
+      Logger.log(`   ElevenLabs (Voz): ${elevenLabsAvailable ? '✅ Habilitado' : '❌ Deshabilitado'}`);
       Logger.log("===================================================");
 
     } catch (error) {
