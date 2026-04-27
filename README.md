@@ -24,12 +24,10 @@ Este bot de Telegram simula una conversación con Javier Soto, Asistente de Dire
    git clone <url-repositorio>
    cd elias-bot
    ```
-
 2. Instala las dependencias:
    ```bash
    npm install
    ```
-
 3. Crea un archivo `.env` en la raíz del proyecto con las siguientes variables:
    ```
    BOT_TOKEN="tu_token_de_telegram"
@@ -38,9 +36,7 @@ Este bot de Telegram simula una conversación con Javier Soto, Asistente de Dire
    AUTHORIZED_USERS="id_usuario1,id_usuario2"
    ADMIN_USERS="id_usuario_admin"
    ```
-
    > **Nota:** Para obtener tu ID de Telegram, puedes hablar con @userinfobot en Telegram.
-
 4. Inicia el bot:
    ```bash
    npm start
@@ -66,3 +62,11 @@ Para cambiar la voz, necesitarás reemplazar el ID de voz en la configuración (
 ## Licencia
 
 Este proyecto está licenciado bajo la licencia ISC.
+
+---
+
+## Financiación
+
+Actividad subvencionada por el Ministerio de Cultura
+
+![Ministerio de Cultura](https://www.cultura.gob.es/dam/jcr:cc3655a4-bbdd-471d-b330-792f39864faf/logo-transparente-convivencia-blanco-y-negro-con-caja-small.png)
